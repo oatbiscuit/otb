@@ -143,7 +143,7 @@ cmd_fsck() {
 }
 
 cmd_config() {
-    die 'TODO'
+    "$EDITOR" "$CONFIG_FILE"
 }
 
 cmd_version() {
@@ -206,6 +206,7 @@ main() {
 
     case "${1:-}" in
         i|import) shift; cmd_import "$@" ;;
+        config) cmd_config; exit 0 ;;
         ''|help) cmd_help; exit 0 ;;
         v|version) cmd_version; exit 0 ;;
         *) die "unknown command: '${1:-}'" 2 ;;
