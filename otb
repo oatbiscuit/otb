@@ -6,8 +6,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 readonly VERSION="0.1.0"
-readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/otb"
-readonly CONFIG_FILE="${CONFIG_DIR}/config"
+readonly APP_DIR="otb"
+readonly XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+readonly XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+readonly CONFIG_FILE="${XDG_CONFIG_HOME}/${APP_DIR}/config"
+readonly CHECKSUMS_FILE="${XDG_DATA_HOME}/${APP_DIR}/checksums"
 
 IMG_ROOT="${IMG_ROOT:-$HOME/Pictures}"
 EDITOR="${EDITOR:-vi}"
@@ -48,8 +51,26 @@ has() {
 }
 
 chk_depends() {
-    has b3sum || warn 'depends - b3sum not found'
-    has exiftool || warn 'depends - exiftool not found'
+    missing=0
+    has b3sum || { warn 'depends - b3sum not found'; missing=1; }
+    has exiftool || { warn 'depends - exiftool not found'; missing=1; }
+    [ "$missing" -eq 1 ] && die 'missing dependencies' || return 0
+}
+
+glob() {
+    case "$1" in 
+        "$2") return 0 ;; 
+        *) return 1 ;; 
+    esac
+}
+
+yn() {
+    printf '%s [y/n]: ' "$1"
+    stty -icanon
+    answer=$(dd ibs=1 count=1 2>/dev/null || read -r answer)
+    stty icanon
+    printf '\n'
+    glob "$answer" '[yY]'
 }
 
 get_root() {
@@ -75,9 +96,7 @@ get_root() {
 }
 
 get_image_date() {
-    file="$1"
-
-
+    die 'TODO'
 }
 
 cmd_import() {
@@ -164,6 +183,12 @@ EOF
 }
 
 main() {
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    mkdir -p "$(dirname "$CHECKSUMS_FILE")"
+
+    [ ! -f "$CONFIG_FILE" ] && touch "$CONFIG_FILE"
+    [ ! -f "$CHECKSUMS_FILE" ] && touch "$CHECKSUMS_FILE"
+
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --) shift; break ;;
