@@ -42,7 +42,7 @@ warn() {
 }
 
 verbose() {
-    [ "${VERBOSE}" -eq 1 ] && log "$1" "VERBOSE"
+    [ "$VERBOSE" -eq 1 ] && log "$1" "VERBOSE"
 }
 
 has() {
@@ -58,8 +58,9 @@ chk_depends() {
 }
 
 glob() {
+    # shellcheck disable=2254
     case "$1" in 
-        "$2") return 0 ;; 
+        $2) return 0 ;; 
         *) return 1 ;; 
     esac
 }
@@ -108,6 +109,43 @@ cmd_import() {
 
     log "src location: ${src}"
     log "target location: ${target}"
+
+    files=""
+    count=0
+    while read -r file; do
+        files="$files$file\n"
+        count=$((count + 1))
+    done <<EOF
+$(find "$src" -type f)
+EOF
+
+    log "found $count files..."
+    printf '%b' "$files" | while read -r file; do
+        filename="${file##*/}"
+        printf '%s\n' "   - $filename"
+    done
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log "DRY RUN: would copy $count files to $target"
+        return
+    fi
+
+    if ! yn "copy these $count files?"; then
+        log 'import cancelled'
+        return
+    fi
+
+    printf '%b' "$files" | while read -r file; do
+        filename="${file##*/}"
+        cp "$file" "$target/$filename"
+        verbose "copying '$file' -> '$target/$filename'"
+        [ -f "$target/$filename" ] || die "copy failed: $file"
+        verbose "copying '$file' was successful"
+        hash=$(b3sum "$target/$filename" | cut -d' ' -f1)
+        verbose "$target/$filename (checksum: $hash)"
+        echo "$hash|$target/$filename|$(date +%s)" >> "$CHECKSUMS_FILE"
+        verbose "updated checksums file: $CHECKSUMS_FILE"
+    done
 }
 
 cmd_export() {
