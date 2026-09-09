@@ -197,6 +197,18 @@ build_target_path() {
     result=$(echo "$result" | sed "s/%f/$basename/g")
     result=$(echo "$result" | sed "s/%e/$extension/g")
 
+    echo "$result" | sed 's/\/\//\//g' | sed 's/^\/\///'
+}
+
+sanitize_filename() {
+    filename="$1"
+    result="$filename"
+    result=$(echo "$result" | tr ' ' '_')
+    result=$(echo "$result" | sed 's/[^a-zA-Z0-9._-]/_/g')
+    result=$(echo "$result" | sed 's/-_/-/g')
+    result=$(echo "$result" | sed 's/_-/-/g')
+    result=$(echo "$result" | sed 's/__*/_/g')
+    result=$(echo "$result" | tr '[:upper:]' '[:lower:]')
     echo "$result"
 }
 
@@ -238,19 +250,32 @@ EOF
     printf '%b' "$files" | while read -r file; do
         filename="${file##*/}"
         date=$(get_image_date "$file")
+        template=$(get_import_template)
         path_template=$(build_target_path "$file" "$date")
-        target_path="$target/$path_template"
+
+        case "$template" in
+            *%f*|*%e*)
+                target_path="$target/$(dirname "$path_template")"
+                new_filename=$(basename "$path_template")
+                ;;
+            *)
+                target_path="$target/$path_template"
+                new_filename="$filename"
+                ;;
+        esac
+    
+        new_filename=$(sanitize_filename "$new_filename")
 
         mkdir -p "$target_path"
-        cp "$file" "$target_path/$filename"
-        verbose "copying '$file' -> '$target_path/$filename'"
+        cp "$file" "$target_path/$new_filename"
+        verbose "copying '$file' -> '$target_path/$new_filename'"
 
-        [ -f "$target_path/$filename" ] || die "copy failed: $file"
+        [ -f "$target_path/$new_filename" ] || die "copy failed: $file"
         verbose "copying '$file' was successful"
 
-        hash=$(b3sum "$target_path/$filename" | cut -d' ' -f1)
-        verbose "$target_path/$filename (checksum: $hash)"
-        echo "$hash|$target_path/$filename|$(date +%s)" >> "$CHECKSUMS_FILE"
+        hash=$(b3sum "$target_path/$new_filename" | cut -d' ' -f1)
+        verbose "$target_path/$new_filename (checksum: $hash)"
+        echo "$hash|$target_path/$new_filename|$(date +%s)" >> "$CHECKSUMS_FILE"
         verbose "updated checksums file: $CHECKSUMS_FILE"
     done
 }
