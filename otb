@@ -782,6 +782,7 @@ cmd_fsck() {
 }
 
 cmd_config() {
+    has "$EDITOR" || die "config: editor '$EDITOR' not found"
     "$EDITOR" "$CONFIG_FILE"
 }
 
