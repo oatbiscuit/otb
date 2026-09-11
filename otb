@@ -579,11 +579,17 @@ EOF
         if [ "$_pg_i" -ne "$_pg_keep" ]; then
             if [ -f "$_pg_p" ]; then
                 _pg_file_size=$(wc -c < "$_pg_p" 2>/dev/null || echo 0)
-                if rm -f "$_pg_p"; then
-                    log "dupes: deleted $_pg_p"
+                if [ "$DRY_RUN" -eq 1 ]; then
+                    log "dupes: would delete $_pg_p"
                     deleted_count=$((deleted_count + 1))
                     freed_size=$((freed_size + _pg_file_size))
-                    checksums_remove "$_pg_p"
+                else
+                    if rm -f "$_pg_p"; then
+                        log "dupes: deleted $_pg_p"
+                        deleted_count=$((deleted_count + 1))
+                        freed_size=$((freed_size + _pg_file_size))
+                        checksums_remove "$_pg_p"
+                    fi
                 fi
             fi
         fi
