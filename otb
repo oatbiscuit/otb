@@ -387,6 +387,51 @@ process_tag_file() {
     fi
 }
 
+process_rate_file() {
+    file="$1"
+
+    if ! is_image_file "$file"; then
+        warn "rate: skipping non-image: $file"
+        return
+    fi
+
+    filename=${file##*/}
+    current=$(get_rating "$file")
+
+    if [ -n "$set_value" ]; then
+        # Validate 1-5
+        case "$set_value" in
+            [1-5]) ;;
+            *) die "rate: rating must be 1-5" ;;
+        esac
+        set_rating "$file" "$set_value"
+        log "rate: set rating to $set_value for $filename"
+        rate_set=$((rate_set + 1))
+    elif [ "$up" -eq 1 ]; then
+        new=$((current + 1))
+        [ "$new" -gt 5 ] && new=5
+        set_rating "$file" "$new"
+        log "rate: rating up: ${current:-0} → $new for $filename"
+        rate_set=$((rate_set + 1))
+    elif [ "$down" -eq 1 ]; then
+        new=$((current - 1))
+        [ "$new" -lt 1 ] && new=1
+        set_rating "$file" "$new"
+        log "rate: rating down: ${current:-0} → $new for $filename"
+        rate_set=$((rate_set + 1))
+    elif [ "$clear" -eq 1 ]; then
+        clear_rating "$file"
+        log "rate: cleared rating for $filename"
+        rate_cleared=$((rate_cleared + 1))
+    fi
+
+    metadata_sync_from_xmp "$file"
+
+    if [ "$list" -eq 1 ]; then
+        log "rating for $filename: ${current:-none}"
+    fi
+}
+
 build_target_path() {
     file="$1"
     date="$2"
@@ -580,7 +625,55 @@ EOF
 }
 
 cmd_rate() {
-    die 'TODO'
+    set_value=""
+    up=0
+    down=0
+    clear=0
+    list=0
+    recursive=0
+    files=""
+    rate_set=0
+    rate_cleared=0
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -s|--set) set_value="$2"; shift 2 ;;
+            -u|--up) up=1; shift ;;
+            -d|--down) down=1; shift ;;
+            -c|--clear) clear=1; shift ;;
+            -l|--list) list=1; shift ;;
+            -r|--recursive) recursive=1; shift ;;
+            -*) die "rate: unknown option '$1'" ;;
+            *) files="$files $1"; shift ;;
+        esac
+    done
+
+    [ -z "$files" ] && die "rate: file or directory required"
+    [ -z "$set_value" ] && [ "$up" -eq 0 ] && [ "$down" -eq 0 ] && \
+        [ "$clear" -eq 0 ] && [ "$list" -eq 0 ] && \
+        die "rate: specify -s/--set, -u/--up, -d/--down, -c/--clear, or -l/--list"
+
+    for item in $files; do
+        if [ -f "$item" ]; then
+            process_rate_file "$item"
+        elif [ -d "$item" ] && [ "$recursive" -eq 1 ]; then
+            while read -r file; do
+                if is_image_file "$file"; then
+                    process_rate_file "$file"
+                fi
+            done <<EOF
+$(find "$item" -type f)
+EOF
+        elif [ -d "$item" ]; then
+            warn "rate: skipping directory '$item' (use -r or --recursive)"
+        else
+            warn "rate: skipping '$item' (not found)"
+        fi
+    done
+
+    if [ "$list" -eq 0 ]; then
+        log "rate complete: $rate_set rated, $rate_cleared cleared"
+    fi
 }
 
 cmd_find() {
@@ -679,6 +772,7 @@ main() {
     case "${1:-}" in
         i|import) shift; cmd_import "$@" ;;
         t|tag) shift; cmd_tag "$@" ;;
+        r|rate) shift; cmd_rate "$@" ;;
         config) cmd_config; exit 0 ;;
         ''|help) cmd_help; exit 0 ;;
         v|version) cmd_version; exit 0 ;;
