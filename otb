@@ -82,6 +82,22 @@ yn() {
     glob "$answer" '[yY]'
 }
 
+ask_number() {
+    prompt="$1"
+    max="$2"
+    while :; do
+        printf '%s [1-%d]: ' "$prompt" "$max" >&2
+        read -r answer
+        case "$answer" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ "$answer" -ge 1 ] && [ "$answer" -le "$max" ]; then
+            printf '%s\n' "$answer"
+            return 0
+        fi
+    done
+}
+
 cleanup_tmp() {
     [ -n "${tmp_files:-}" ] && rm -f "$tmp_files"
     trap - EXIT INT TERM
@@ -120,6 +136,19 @@ import_template = %Y/%m
 # Default: vi (or $EDITOR environment variable)
 editor = vi
 EOF
+}
+
+human_size() {
+    bytes="$1"
+    if [ "$bytes" -ge 1073741824 ]; then
+        printf '%d.%d GB' $((bytes / 1073741824)) $((bytes % 1073741824 / 107374182))
+    elif [ "$bytes" -ge 1048576 ]; then
+        printf '%d.%d MB' $((bytes / 1048576)) $((bytes % 1048576 / 104857))
+    elif [ "$bytes" -ge 1024 ]; then
+        printf '%d.%d KB' $((bytes / 1024)) $((bytes % 1024 / 102))
+    else
+        printf '%d B' "$bytes"
+    fi
 }
 
 expand_path() {
@@ -365,6 +394,17 @@ EOF
     log "synced $count files"
 }
 
+checksums_remove() {
+    path="$1"
+    if awk -F"$SEP" -v p="$path" '$2 != p' "$CHECKSUMS_FILE" \
+        > "${CHECKSUMS_FILE}.tmp" 2>/dev/null; then
+        mv "${CHECKSUMS_FILE}.tmp" "$CHECKSUMS_FILE" || true
+    else
+        rm -f "${CHECKSUMS_FILE}.tmp" || true
+    fi
+    return 0
+}
+
 process_tag_file() {
     file="$1"
     index="$2"
@@ -489,6 +529,69 @@ process_rate_file() {
     fi
 
     metadata_sync_from_xmp "$file"
+    return 0
+}
+
+process_dupe_group() {
+    _pg_hash="$1"
+    _pg_paths="$2"
+    _pg_size="$3"
+
+    _pg_count=$(printf '%s\n' "$_pg_paths" | grep -c . || true)
+    [ "$_pg_count" -lt 2 ] && return 0
+
+    group_count=$((group_count + 1))
+    total_dupes=$((total_dupes + _pg_count - 1))
+    total_size=$((total_size + _pg_size))
+
+    log "Group $group_count ($(human_size "$_pg_size")):"
+
+    _pg_i=1
+    while IFS= read -r _pg_p; do
+        [ -z "$_pg_p" ] && continue
+        printf '   %d. %s\n' "$_pg_i" "$_pg_p" >&2
+        _pg_i=$((_pg_i + 1))
+    done <<EOF
+$_pg_paths
+EOF
+
+    if [ "$delete_flag" -eq 0 ]; then
+        return 0
+    fi
+
+    _pg_keep=$(ask_number "Which file to keep?" "$_pg_count")
+    _pg_to_delete=$((_pg_count - 1))
+
+    if [ "$_pg_to_delete" -eq 1 ]; then
+        _pg_prompt="Delete the other file?"
+    else
+        _pg_prompt="Delete the other $_pg_to_delete files?"
+    fi
+
+    if ! yn "$_pg_prompt"; then
+        verbose "dupes: skipped group $group_count"
+        return 0
+    fi
+
+    _pg_i=1
+    while IFS= read -r _pg_p; do
+        [ -z "$_pg_p" ] && continue
+        if [ "$_pg_i" -ne "$_pg_keep" ]; then
+            if [ -f "$_pg_p" ]; then
+                _pg_file_size=$(wc -c < "$_pg_p" 2>/dev/null || echo 0)
+                if rm -f "$_pg_p"; then
+                    log "dupes: deleted $_pg_p"
+                    deleted_count=$((deleted_count + 1))
+                    freed_size=$((freed_size + _pg_file_size))
+                    checksums_remove "$_pg_p"
+                fi
+            fi
+        fi
+        _pg_i=$((_pg_i + 1))
+    done <<EOF
+$_pg_paths
+EOF
+
     return 0
 }
 
@@ -765,19 +868,85 @@ cmd_rate() {
     fi
 }
 
-cmd_find() {
-    die 'TODO'
-}
-
 cmd_dupes() {
-    die 'TODO'
+    delete_flag=0
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -d|--delete) delete_flag=1; shift ;;
+            -*) die "dupes: unknown option '$1'" ;;
+            *) die "dupes: unexpected argument '$1'" ;;
+        esac
+    done
+
+    if [ ! -s "$CHECKSUMS_FILE" ]; then
+        log 'dupes: no checksums found'
+        return 0
+    fi
+
+    log 'dupes: scanning checksums...'
+
+    tmp_files=$(mktemp) || die 'dupes: could not create temp file'
+    trap 'rm -f "$tmp_files"' EXIT INT TERM
+
+    sort -t"$SEP" -k1 "$CHECKSUMS_FILE" > "$tmp_files" || true
+
+    group_count=0
+    total_dupes=0
+    total_size=0
+    deleted_count=0
+    freed_size=0
+
+    prev_hash=""
+    group_paths=""
+    group_size=0
+
+    while IFS="$SEP" read -r hash path _ <&3; do
+        if [ "$hash" = "$prev_hash" ]; then
+            if [ -z "$group_paths" ]; then
+                group_paths="$path"
+            else
+                group_paths=$(printf '%s\n%s' "$group_paths" "$path")
+            fi
+
+            if [ -f "$path" ]; then
+                sz=$(wc -c < "$path" 2>/dev/null || echo 0)
+                group_size=$((group_size + sz))
+            fi
+        else
+            if [ -n "$prev_hash" ]; then
+                process_dupe_group "$prev_hash" "$group_paths" "$group_size"
+            fi
+            prev_hash="$hash"
+            group_paths="$path"
+
+            group_size=0
+            if [ -f "$path" ]; then
+                group_size=$(wc -c < "$path" 2>/dev/null || echo 0)
+            fi
+        fi
+    done 3< "$tmp_files"
+
+    if [ -n "$prev_hash" ]; then
+        process_dupe_group "$prev_hash" "$group_paths" "$group_size"
+    fi
+
+    if [ "$group_count" -eq 0 ]; then
+        log 'dupes: no duplicates found'
+        cleanup_tmp
+        return 0
+    fi
+
+    if [ "$delete_flag" -eq 1 ]; then
+        log "dupes: deleted $deleted_count files, freed $(human_size "$freed_size")"
+    else
+        log "dupes: $group_count group(s), $total_dupes duplicate(s), $(human_size "$total_size") recoverable"
+    fi
+
+    cleanup_tmp
 }
 
-cmd_stats() {
-    die 'TODO'
-}
-
-cmd_fsck() {
+cmd_audit() {
     die 'TODO'
 }
 
@@ -800,10 +969,8 @@ Commands (short/long):
     i, import       [DIR]   Import files from a folder/media device.
     t, tag          [FILE]  Add/remove tags from images.
     r, rate         [FILE]  Rate images (1-5 stars).
-    f, find         [QUERY] Search images by tags/rating/date.
-    d, dupes        [DIR]   Find duplicate images.
-    s, stats        [DIR]   Show statistics for a folder.
-    fsck            [DIR]   Check integrity of image collection.
+    d, dupes        [DIR]   Find duplicate files.
+    a, audit        [DIR]   Check integrity of file collection.
     v, version              Show version information.
     config                  Edit configuration file. 
 
@@ -811,12 +978,13 @@ Options:
     --target        [DIR]   Override root directory for this command.
     --template      [STR]   Override import template for this command.
     --dry-run               Show what would be done without executing.
+    -d, --delete            Delete duplicates (dupes only).
     -v, --verbose           Show detailed output.
     -h, --help              Show this help message.
     -V, --version           Show version information.
 
 Environment Variables:
-    IMG_ROOT                Default image directory (default: $HOME/Pictures).
+    IMG_ROOT                Default file directory (default: $HOME/Pictures).
     IMPORT_TEMPLATE         Default import template (default: %Y/%m).
     EDITOR                  Editor for config/tag editing (default: vi).
 
@@ -861,9 +1029,11 @@ main() {
         i|import) shift; cmd_import "$@" ;;
         t|tag) shift; cmd_tag "$@" ;;
         r|rate) shift; cmd_rate "$@" ;;
-        config) cmd_config; exit 0 ;;
-        ''|help) cmd_help; exit 0 ;;
+        d|dupes) shift; cmd_dupes "$@" ;;
+        a|audit) shift; cmd_audit "$@" ;;
         v|version) cmd_version; exit 0 ;;
+        config) cmd_config; exit 0 ;;
+        ''|h|help) cmd_help; exit 0 ;;
         *) die "unknown command: '${1:-}'" 2 ;;
     esac
 }
