@@ -953,7 +953,45 @@ cmd_dupes() {
 }
 
 cmd_audit() {
-    die 'TODO'
+    dir="${1:-$(get_root)}"
+
+    [ ! -d "$dir" ] && die "audit: '$dir' is not a directory"
+
+    if [ ! -s "$CHECKSUMS_FILE" ]; then
+        log 'audit: no checksums found'
+        return 0
+    fi
+
+    log 'audit: checking known files...'
+
+    total=0
+    ok=0
+    corrupted=0
+    missing=0
+
+    while IFS="$SEP" read -r hash path _ <&3; do
+        total=$((total + 1))
+
+        if [ ! -f "$path" ]; then
+            missing=$((missing + 1))
+            log "audit: MISSING $path"
+            continue
+        fi
+
+        current=$(b3sum "$path" 2>/dev/null | cut -d' ' -f1 || true)
+        if [ "$current" = "$hash" ]; then
+            ok=$((ok + 1))
+        else
+            corrupted=$((corrupted + 1))
+            log "audit: CORRUPT $path"
+        fi
+    done 3< "$CHECKSUMS_FILE"
+
+    log "audit: $total files, $ok ok, $corrupted corrupted, $missing missing"
+    if [ "$corrupted" -gt 0 ] || [ "$missing" -gt 0 ]; then
+        return 1
+    fi
+    return 0
 }
 
 cmd_config() {
