@@ -147,16 +147,17 @@ get_config() {
             fi
         done < "$CONFIG_FILE"
     fi
-
+    
     expand_path "$default"
 }
 
 get_root() {
-    if [ -n "${TARGET_DIR:-}" ]; then 
+    if [ -n "${TARGET_DIR:-}" ]; then
         printf '%s\n' "$TARGET_DIR" 
         return
-    fi 
-    get_config "root_dir" "$IMG_ROOT"
+    fi
+    result=$(get_config "root_dir" "$IMG_ROOT")
+    printf '%s\n' "$result"
 }
 
 get_import_template() {
@@ -175,12 +176,14 @@ get_import_template() {
 
 get_sidecar_path() {
     file="$1"
-    echo "${file}.xmp"
+    result="${file}.xmp"
+
+    echo "$result"
 }
 
 is_image_file(){
-    file=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-    case "$file" in
+    _lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$_lower" in
         *.jpg|*.jpeg|*.png|*.gif|*.cr2|*.nef|*.arw|*.dng|*.orf|*.rw2|*.raf|*.pef|*.srw) return 0 ;;
         *) return 1 ;;
     esac
@@ -191,35 +194,91 @@ has_sidecar() {
 }
 
 get_tags() {
-    exiftool -sep ", " -XMP-dc:Subject "$1" 2>/dev/null | \
-        sed 's/^.*: //' | \
-        tr ',' '\n' | \
-        sed 's/^ // ;s/ $//' | \
-        grep -v '^$'
+    file="$1"
+    sidecar="$(get_sidecar_path "$file")"
+
+    if [ -f "$sidecar" ]; then
+        exiftool -s3 -sep ", " -XMP-dc:Subject "$sidecar" 2>/dev/null | \
+            tr ',' '\n' | sed 's/^ // ;s/ $//' | grep -v '^$'
+    else
+        exiftool -s3 -sep ", " -XMP-dc:Subject "$file" 2>/dev/null | \
+            tr ',' '\n' | sed 's/^ // ;s/ $//' | grep -v '^$'
+    fi
+}
+
+add_tag() {
+    file="$1"
+    tag="$2"
+    sidecar=$(get_sidecar_path "$file")
+
+    if [ -f "$sidecar" ]; then
+        exiftool -XMP-dc:Subject+="$tag" "$sidecar" >/dev/null 2>&1
+    else
+        exiftool -o "$sidecar" -XMP-dc:Subject+="$tag" "$file" >/dev/null 2>&1
+    fi
+}
+
+remove_tag() {
+    file="$1"
+    tag="$2"
+    sidecar=$(get_sidecar_path "$file")
+
+    if [ -f "$sidecar" ]; then
+        exiftool -XMP-dc:Subject-="$tag" "$sidecar" >/dev/null 2>&1
+    fi
 }
 
 get_rating() {
-    exiftool -XMP:Rating "$1" 2>/dev/null | \
-        grep -o '[0-9]' | \
-        head -1
+    file="$1"
+    sidecar="$(get_sidecar_path "$file")"
+
+    if [ -f "$sidecar" ]; then
+        exiftool -s3 -XMP:Rating "$sidecar" 2>/dev/null | head -1
+    else
+        exiftool -s3 -XMP:Rating "$file" 2>/dev/null | head -1
+    fi
+}
+
+set_rating() {
+    file="$1"
+    rating="$2"
+    sidecar=$(get_sidecar_path "$file")
+
+    if [ -f "$sidecar" ]; then
+        exiftool -XMP:Rating="$rating" "$sidecar" >/dev/null 2>&1
+    else
+        exiftool -o "$sidecar" -XMP:Rating="$rating" "$file" >/dev/null 2>&1
+    fi
+}
+
+clear_rating() {
+    file="$1"
+    sidecar=$(get_sidecar_path "$file")
+
+    [ ! -f "$sidecar" ] && return 0
+
+    exiftool -XMP:Rating= "$sidecar" >/dev/null 2>&1
 }
 
 get_image_date() {
     file="$1"
 
-    date=$(exiftool -DateTimeOriginal -d "%Y-%m-%d" "$file" 2>/dev/null)
+    date=$(exiftool -s3 -DateTimeOriginal -d "%Y-%m-%d" "$file" 2>/dev/null | head -1)
+
     if [ -n "$date" ]; then
         echo "$date"
         return
     fi
 
     date=$(date -r "$file" +"%Y-%m-%d" 2>/dev/null)
+
     if [ -n "$date" ]; then
         echo "$date"
         return
     fi
-
-    date +"%Y-%m-%d"
+    
+    date=$(date +"%Y-%m-%d")
+    echo "$date"
 }
 
 get_metadata_field() {
@@ -282,6 +341,52 @@ EOF
     log "synced $count files"
 }
 
+process_tag_file() {
+    file="$1"
+
+    if ! is_image_file "$file"; then
+        warn "tag: skipping non-image: $file"
+        return
+    fi
+    
+    filename=${file##*/}
+    sidecar=$(get_sidecar_path "$file")
+    current_tags="|$(get_tags "$file" | tr '\n' '|')"
+
+    for tag in $add_tags; do
+        if echo "$current_tags" | grep -q "|$tag|"; then
+            log "tag: tag '$tag' already exists in $filename"
+            tag_skipped=$((tag_skipped + 1 ))
+        else
+            add_tag "$file" "$tag"
+            log "tag: added '$tag' to $filename"
+            current_tags="$current_tags$tag|"
+            tag_added=$((tag_added + 1))
+        fi
+    done
+
+    for tag in $delete_tags; do
+        if echo "$current_tags" | grep -q "|$tag|"; then
+            remove_tag "$file" "$tag"
+            log "tag: removed '$tag' from $filename"
+            current_tags=$(echo "$current_tags" | sed "s/|$tag|/|/")
+            tag_removed=$((tag_removed + 1))
+        else
+            log "tag: '$tag' not found in $filename"
+            tag_skipped=$((tag_skipped + 1))
+        fi
+    done
+
+    metadata_sync_from_xmp "$file"
+
+    if [ "$list_tags" -eq 1 ]; then
+        log "tags for $filename:"
+        get_tags "$file" | while read -r tag; do
+            printf '    - %s\n' "$tag"
+        done
+    fi
+}
+
 build_target_path() {
     file="$1"
     date="$2"
@@ -301,18 +406,21 @@ build_target_path() {
     result=$(echo "$result" | sed "s/%f/$basename/g")
     result=$(echo "$result" | sed "s/%e/$extension/g")
 
-    echo "$result" | sed 's/\/\//\//g' | sed 's/^\/\///'
+    result=$(echo "$result" | sed 's/\/\//\//g' | sed 's/^\/\///')
+    echo "$result"
 }
 
 sanitize_filename() {
     filename="$1"
+    
     result="$filename"
     result=$(echo "$result" | tr ' ' '_')
-    result=$(echo "$result" | sed 's/[^a-zA-Z0-9._-]/_/g')
+    result=$(echo "$result" | sed 's/[^-a-zA-Z0-9._]/_/g')
     result=$(echo "$result" | sed 's/-_/-/g')
     result=$(echo "$result" | sed 's/_-/-/g')
     result=$(echo "$result" | sed 's/__*/_/g')
     result=$(echo "$result" | tr '[:upper:]' '[:lower:]')
+
     echo "$result"
 }
 
@@ -421,7 +529,54 @@ cmd_browse() {
 }
 
 cmd_tag() {
-    die 'TODO'
+    add_tags=""
+    delete_tags=""
+    list_tags=0
+    recursive=0
+    files=""
+    tag_added=0
+    tag_removed=0
+    tag_skipped=0
+    file_count=0
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -a|--add) add_tags="$add_tags $2"; shift 2 ;;
+            -d|--delete) delete_tags="$delete_tags $2"; shift 2 ;;
+            -l|--list) list_tags=1; shift ;;
+            -r|--recursive) recursive=1; shift ;;
+            -*) die "tag: unknown option '$1'" ;;
+            *) files="$files $1"; shift ;;
+        esac
+    done
+
+    [ -z "$files" ] && die "tag: file or directory required"
+    [ -z "$add_tags" ] && [ -z "$delete_tags" ] && [ "$list_tags" -eq 0 ] && \
+        die "tag: specify -a/--add, -d/--delete, or -l/--list"
+
+    for item in $files; do
+        if [ -f "$item" ]; then
+            process_tag_file "$item"
+            file_count=$((file_count + 1))
+        elif [ -d "$item" ] && [ "$recursive" -eq 1 ]; then
+            while read -r file; do
+                if is_image_file "$file"; then 
+                    process_tag_file "$file"
+                    file_count=$((file_count + 1))
+                fi
+            done <<EOF
+$(find "$item" -type f)
+EOF
+        elif [ -d "$item" ]; then
+            warn "tag: skipping directory '$item' (use -r or --recursive)"
+        else
+            warn "tag: skipping '$item' (not found)"
+        fi
+    done
+
+    if [ "$list_tags" -eq 0 ]; then
+        log "tag complete: $tag_added added, $tag_removed removed, $tag_skipped skipped"
+    fi
 }
 
 cmd_rate() {
@@ -523,6 +678,7 @@ main() {
 
     case "${1:-}" in
         i|import) shift; cmd_import "$@" ;;
+        t|tag) shift; cmd_tag "$@" ;;
         config) cmd_config; exit 0 ;;
         ''|help) cmd_help; exit 0 ;;
         v|version) cmd_version; exit 0 ;;
